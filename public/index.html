@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>RCV Scene Control</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0e14'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23ef4444'/%3E%3C/svg%3E" />
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #151a23;
+    --panel-2: #1d2430;
+    --line: #2a3341;
+    --text: #e6ebf2;
+    --muted: #8b97a8;
+    --pgm: #ef4444;
+    --pvw: #22c55e;
+    --accent: #3b82f6;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .wrap { max-width: 900px; margin: 0 auto; padding: 16px; }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+
+  .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--muted);
+    box-shadow: 0 0 0 3px rgba(139,151,168,.15);
+  }
+  .dot.on { background: var(--pvw); box-shadow: 0 0 0 3px rgba(34,197,94,.18); }
+  .dot.off { background: var(--pgm); box-shadow: 0 0 0 3px rgba(239,68,68,.18); }
+
+  .title { font-weight: 650; letter-spacing: .2px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 14px;
+    margin: 14px 0;
+  }
+
+  .scene {
+    position: relative;
+    min-height: 132px;
+    padding: 16px;
+    text-align: left;
+    color: var(--text);
+    background: var(--panel);
+    border: 2px solid var(--line);
+    border-radius: 14px;
+    cursor: pointer;
+    transition: transform .06s ease, border-color .12s ease, background .12s ease;
+  }
+  .scene:hover:not(:disabled) { background: var(--panel-2); }
+  .scene:active:not(:disabled) { transform: scale(.985); }
+  .scene:disabled { opacity: .4; cursor: not-allowed; }
+
+  .scene .num { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .scene .name {
+    margin-top: 6px;
+    font-size: 22px;
+    font-weight: 620;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+  }
+  .scene .tag {
+    position: absolute; top: 14px; right: 14px;
+    font-size: 11px; font-weight: 700; letter-spacing: .8px;
+    padding: 3px 8px; border-radius: 999px;
+  }
+
+  .scene.live { border-color: var(--pgm); background: rgba(239,68,68,.12); }
+  .scene.live .tag { background: var(--pgm); color: #fff; }
+  .scene.preview { border-color: var(--pvw); background: rgba(34,197,94,.10); }
+  .scene.preview .tag { background: var(--pvw); color: #07220f; }
+
+  .panel {
+    padding: 14px 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .row + .row { margin-top: 12px; }
+
+  label.field { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+
+  select, input[type="number"] {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font: inherit;
+  }
+  input[type="number"] { width: 92px; }
+  input[type="range"] { flex: 1; min-width: 160px; accent-color: var(--accent); }
+
+  button.action {
+    flex: 1;
+    min-height: 58px;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: .5px;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 2px solid var(--line);
+    border-radius: 12px;
+    cursor: pointer;
+  }
+  button.action:hover:not(:disabled) { border-color: var(--muted); }
+  button.action:active:not(:disabled) { transform: scale(.99); }
+  button.action:disabled { opacity: .4; cursor: not-allowed; }
+  button.cut { border-color: rgba(239,68,68,.5); }
+  button.auto { border-color: rgba(59,130,246,.5); }
+
+  .toggle {
+    display: inline-flex;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 3px;
+  }
+  .toggle button {
+    border: 0; background: transparent; color: var(--muted);
+    font: inherit; font-size: 13px; padding: 6px 12px;
+    border-radius: 999px; cursor: pointer;
+  }
+  .toggle button.sel { background: var(--accent); color: #fff; font-weight: 600; }
+
+  kbd {
+    font: 11px ui-monospace, monospace;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 5px;
+    padding: 1px 5px;
+    color: var(--muted);
+  }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 24px;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--pgm); color: #fff;
+    padding: 10px 16px; border-radius: 10px;
+    font-size: 14px; font-weight: 500;
+    opacity: 0; pointer-events: none;
+    transition: opacity .2s ease, transform .2s ease;
+    max-width: 90vw;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  @media (max-width: 560px) {
+    .grid { gap: 10px; }
+    .scene { min-height: 108px; padding: 13px; }
+    .scene .name { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <span class="dot" id="dot"></span>
+    <span class="title" id="device">Connecting…</span>
+    <span class="muted" id="show"></span>
+    <span class="spacer"></span>
+    <label class="field">Mode
+      <select id="mode">
+        <option value="studioLeft">Studio (preview → take)</option>
+        <option value="instant">Instant (cut on select)</option>
+      </select>
+    </label>
+  </header>
+
+  <div class="grid" id="scenes"></div>
+
+  <div class="panel">
+    <div class="row">
+      <label class="field">Transition
+        <select id="transition"></select>
+      </label>
+      <label class="field">
+        <input type="checkbox" id="mirror" /> Mirror
+      </label>
+      <span class="spacer"></span>
+      <div class="toggle" id="behaviour">
+        <button data-v="take" class="sel">One-click take</button>
+        <button data-v="preview">Preview then take</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <label class="field" style="flex:1">Duration
+        <input type="range" id="timeRange" min="0" max="3000" step="50" value="500" />
+      </label>
+      <input type="number" id="timeMs" min="0" max="60000" step="50" value="500" />
+      <span class="muted">ms</span>
+    </div>
+
+    <div class="row">
+      <button class="action cut" id="cut">CUT <kbd>C</kbd></button>
+      <button class="action auto" id="auto">AUTO <kbd>space</kbd></button>
+    </div>
+  </div>
+
+  <p class="muted" style="margin:12px 2px">
+    Scenes <kbd>1</kbd>–<kbd>4</kbd> · AUTO <kbd>space</kbd> · CUT <kbd>C</kbd>
+  </p>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const SCENE_COUNT = 4;
+const $ = (id) => document.getElementById(id);
+
+let connected = false;
+let studioMode = true;
+let busy = false;
+
+function toast(message) {
+  const el = $('toast');
+  el.textContent = message;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 3200);
+}
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.error || (method + ' ' + path + ' failed'));
+  return data;
+}
+
+// Fire-and-forget guard: the device is slower than a double-click.
+async function send(fn) {
+  if (busy) return;
+  busy = true;
+  try {
+    await fn();
+    await refresh();
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    busy = false;
+  }
+}
+
+function buildScenes() {
+  const grid = $('scenes');
+  for (let i = 1; i <= SCENE_COUNT; i++) {
+    const btn = document.createElement('button');
+    btn.className = 'scene';
+    btn.id = 'scene' + i;
+    btn.innerHTML =
+      '<div class="num">SCENE ' + i + '</div>' +
+      '<div class="name">—</div>' +
+      '<div class="tag"></div>';
+    btn.onclick = () => selectScene(i);
+    grid.appendChild(btn);
+  }
+}
+
+function selectScene(index) {
+  const oneClick = $('behaviour').querySelector('.sel').dataset.v === 'take';
+
+  // /transition/run applies the transition settings, selects the scene and — in
+  // studio mode — performs the take. In instant mode the select IS the switch,
+  // so the server skips the take on its own.
+  if (oneClick) {
+    return send(() =>
+      api('POST', '/api/rcv/transition/run', {
+        type: $('transition').value,
+        timeMs: Number($('timeMs').value),
+        mirror: $('mirror').checked,
+        source: { type: 'scene', index },
+        take: 'auto',
+      })
+    );
+  }
+
+  return send(() => api('POST', '/api/rcv/source', { type: 'scene', index }));
+}
+
+function take(mode) {
+  return send(() => api('POST', '/api/rcv/take', { mode }));
+}
+
+async function loadTransitions() {
+  const { transitions } = await api('GET', '/api/rcv/transitions');
+  const select = $('transition');
+  select.innerHTML = '';
+  for (const t of transitions) {
+    const option = document.createElement('option');
+    option.value = t.id;
+    option.textContent = t.title;
+    select.appendChild(option);
+  }
+}
+
+function setConnected(ok, label) {
+  connected = ok;
+  $('dot').className = 'dot ' + (ok ? 'on' : 'off');
+  $('device').textContent = label;
+
+  for (let i = 1; i <= SCENE_COUNT; i++) $('scene' + i).disabled = !ok;
+  $('cut').disabled = !ok;
+  $('auto').disabled = !ok;
+  $('mode').disabled = !ok;
+}
+
+async function refresh() {
+  let status;
+  try {
+    status = await api('GET', '/api/rcv/status');
+  } catch {
+    setConnected(false, 'API unreachable');
+    return;
+  }
+
+  const { device, state, target } = status;
+
+  // UDP discovery can fail (blocked, or a manual IP) while the OSC link is fine,
+  // so don't label a working connection "Unknown".
+  const known = device.name || (device.modelName !== 'Unknown' ? device.modelName : null);
+  setConnected(status.connected, status.connected ? (known || 'RCV @ ' + target.ip) : 'Offline — ' + target.ip);
+
+  $('show').textContent = state.showName ? '“' + state.showName + '”' : '';
+  studioMode = status.studioMode;
+  $('mode').value = state.switchingMode || 'studioLeft';
+
+  // Don't fight the operator while a control has focus.
+  const active = document.activeElement;
+  if (state.transition && active !== $('transition')) $('transition').value = state.transition;
+  if (state.transitionTimeMs != null && active !== $('timeMs') && active !== $('timeRange')) {
+    setTime(state.transitionTimeMs);
+  }
+  if (state.invertWipe != null && active !== $('mirror')) $('mirror').checked = state.invertWipe;
+
+  for (let i = 1; i <= SCENE_COUNT; i++) {
+    const btn = $('scene' + i);
+    const name = state.scenes?.[i - 1];
+    const live = state.program?.type === 'scene' && state.program.index === i;
+    const pvw = studioMode && state.preview?.type === 'scene' && state.preview.index === i;
+
+    btn.querySelector('.name').textContent = name || 'Unassigned';
+    btn.querySelector('.tag').textContent = live ? 'PGM' : pvw ? 'PVW' : '';
+    btn.classList.toggle('live', live);
+    btn.classList.toggle('preview', pvw && !live);
+  }
+
+  // The take buttons only mean something in studio mode.
+  $('cut').style.opacity = studioMode ? '' : '.55';
+  $('auto').style.opacity = studioMode ? '' : '.55';
+}
+
+function setTime(ms) {
+  $('timeMs').value = ms;
+  $('timeRange').value = Math.min(ms, Number($('timeRange').max));
+}
+
+$('timeRange').oninput = () => { $('timeMs').value = $('timeRange').value; };
+$('timeMs').oninput = () => { $('timeRange').value = Math.min(Number($('timeMs').value) || 0, 3000); };
+
+$('timeMs').onchange = () => send(() => api('PUT', '/api/rcv/transition/time', { ms: Number($('timeMs').value) }));
+$('timeRange').onchange = () => send(() => api('PUT', '/api/rcv/transition/time', { ms: Number($('timeRange').value) }));
+
+$('transition').onchange = () =>
+  send(() => api('PUT', '/api/rcv/transition', { type: $('transition').value, mirror: $('mirror').checked }));
+
+$('mirror').onchange = () => send(() => api('PUT', '/api/rcv/transition/mirror', { enabled: $('mirror').checked }));
+
+$('mode').onchange = () => send(() => api('PUT', '/api/rcv/switching-mode', { mode: $('mode').value }));
+
+$('cut').onclick = () => take('cut');
+$('auto').onclick = () => take('auto');
+
+$('behaviour').onclick = (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  for (const b of $('behaviour').children) b.classList.toggle('sel', b === btn);
+  localStorage.setItem('rcv.behaviour', btn.dataset.v);
+};
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.matches('input, select, textarea')) return;
+
+  if (e.key >= '1' && e.key <= String(SCENE_COUNT)) {
+    e.preventDefault();
+    selectScene(Number(e.key));
+  } else if (e.code === 'Space') {
+    e.preventDefault();
+    take('auto');
+  } else if (e.key.toLowerCase() === 'c') {
+    e.preventDefault();
+    take('cut');
+  }
+});
+
+(async function start() {
+  buildScenes();
+
+  const saved = localStorage.getItem('rcv.behaviour');
+  if (saved) {
+    for (const b of $('behaviour').children) b.classList.toggle('sel', b.dataset.v === saved);
+  }
+
+  try {
+    await loadTransitions();
+  } catch (err) {
+    toast(err.message);
+  }
+
+  await refresh();
+  setInterval(refresh, 1000);
+})();
+</script>
+</body>
+</html>
