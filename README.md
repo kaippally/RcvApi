@@ -89,6 +89,26 @@ Duration is 0–60000 ms. `mirror` reverses a wipe's direction.
 | POST | `/api/rcv/take` | `auto` (transition) or `cut` |
 | POST | `/api/rcv/transition/run` | One-shot: set + select + take |
 | POST | `/api/rcv/raw` | Send an arbitrary OSC address/args |
+| GET | `/api/rcv/show` | The live show dump as the device last sent it (raw XML) |
+| GET | `/api/rcv/show/backups` | Archived show snapshots, newest first |
+| GET | `/api/rcv/show/backups/{file}` | One snapshot, raw XML |
+
+### Show snapshots
+
+The device is the only copy of a show — the scene builds, overlay templates, bank names, stream
+bindings and audio strips — and it offers no export. `/show` is already polled every 30 s to read
+bank names, so the dump is kept verbatim in `data/shows/` (gitignored, newest 60, written only
+when the content changes — `last_modified`, `Pgm/PvwScene` and `Pgm/PvwOverlay` move on every
+button press and are excluded from that test). There is no OSC verb that loads a show back, so a
+snapshot is read to rebuild by hand, not replayed.
+
+### The link can be up and deaf
+
+`connected` is a TCP fact. The device silently drops remote-control mode when its show is
+reloaded or RØDE Central takes over, without closing the socket — after which `pgmcurrent` /
+`pvwcurrent` never arrive again and PGM/PVW freeze while everything else looks fine. `/remote` is
+therefore re-sent on every 10 s refresh tick (it is idempotent), and `/api/rcv/status` reports
+`link: { lastRxAt, lastShowAt, stale }` so a consumer can tell a live link from a frozen one.
 
 ### Switching mode matters
 

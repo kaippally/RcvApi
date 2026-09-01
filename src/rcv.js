@@ -12,13 +12,32 @@ const CONNECT_TIMEOUT = 12000;
 
 const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseAttributeValue: true });
 
+// `<Thing size="dynamic"><value0><name>…</name></value0>…` — JUCE's array serialisation, used by
+// <VideoInputs> and <Overlays>. Ordered by the numeric suffix, because object key order is not a
+// contract; a slot with no name is an empty bank and stays an empty string.
+function dynamicNames(node) {
+  if (!node || typeof node !== 'object') return [];
+  return Object.keys(node)
+    .filter((k) => /^value\d+$/.test(k))
+    .sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)))
+    .map((k) => String(node[k]?.name ?? '').trim());
+}
+
+/** Bit 0 = index 1. */
+function maskToIndices(mask) {
+  const out = [];
+  for (let bit = 0; bit < 32; bit++) if (mask & (1 << bit)) out.push(bit + 1);
+  return out;
+}
+
 export class RcvClient extends EventEmitter {
-  constructor({ ip, port = 10024, reconnectInterval = 10000, refreshInterval = 10000 }) {
+  constructor({ ip, port = 10024, reconnectInterval = 10000, refreshInterval = 10000, showInterval = 30000 }) {
     super();
     this.ip = ip;
     this.port = port;
     this.reconnectInterval = reconnectInterval;
     this.refreshInterval = refreshInterval;
+    this.showInterval = showInterval;
 
     this.socket = null;
     this.buffer = Buffer.alloc(0);
@@ -27,7 +46,16 @@ export class RcvClient extends EventEmitter {
     this.lastError = null;
     this.reconnectTimer = null;
     this.refreshTimer = null;
+    this.showTimer = null;
     this.connectTimer = null;
+
+    // The last raw <RcvShow> XML the device sent, and when. This is the only complete record of
+    // the operator's show that leaves the device, so it is kept verbatim rather than only parsed.
+    this.lastShowXml = null;
+    this.lastShowAt = null;
+    // When the device last said anything at all. `connected` is only a TCP fact — a socket that
+    // is up but silent is what a dropped remote-control mode looks like from here.
+    this.lastRxAt = null;
 
     this.device = { model: null, modelName: 'Unknown', name: null, serialNo: null, swVersion: null };
     this.state = {
@@ -43,6 +71,13 @@ export class RcvClient extends EventEmitter {
       streaming: null,
       recording: null,
       scenes: [],
+      // Bank names as the operator set them on the device. Only <Scenes> rides the push
+      // channel; these three come from the show dump, which is why it is re-requested.
+      inputs: [],
+      media: [],
+      overlays: [],
+      /** 1-based indices of the overlays currently on program (from the PgmOverlay bitmask). */
+      programOverlays: [],
     };
   }
 
@@ -79,6 +114,7 @@ export class RcvClient extends EventEmitter {
       this.connected = false;
       clearTimeout(this.connectTimer);
       clearInterval(this.refreshTimer);
+      clearInterval(this.showTimer);
       if (wasConnected) this.emit('log', 'connection closed');
       if (!this.intentional) this.scheduleReconnect();
     });
@@ -98,9 +134,22 @@ export class RcvClient extends EventEmitter {
 
       this.refreshTimer = setInterval(() => {
         if (!this.connected) return;
+        // Re-arm remote-control mode on every tick. The device drops it whenever its show is
+        // reloaded, reset or taken over by RØDE Central, and it does NOT close the socket when
+        // it does — so without this the push channel dies silently while `connected` stays true,
+        // pgm/pvw freeze on their last value and every trigger stops firing. /remote is
+        // idempotent (verified on hardware), so re-sending it costs nothing.
+        this.send('/remote');
         this.send('/device/refresh');
         this.send('/device');
       }, this.refreshInterval);
+
+      // Input, media and overlay names only exist in the show dump — the device never pushes
+      // them the way it pushes a scene rename — so re-pull it on a slow timer to notice edits.
+      this.showTimer = setInterval(() => {
+        if (!this.connected) return;
+        this.send('/show');
+      }, this.showInterval);
 
       this.discover().catch(() => {});
     });
@@ -117,6 +166,7 @@ export class RcvClient extends EventEmitter {
   destroySocket() {
     clearTimeout(this.connectTimer);
     clearInterval(this.refreshTimer);
+    clearInterval(this.showTimer);
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.destroy();
@@ -141,6 +191,7 @@ export class RcvClient extends EventEmitter {
   }
 
   onData(chunk) {
+    this.lastRxAt = Date.now();
     this.buffer = Buffer.concat([this.buffer, chunk]);
 
     while (this.buffer.length >= 4) {
@@ -217,14 +268,22 @@ export class RcvClient extends EventEmitter {
   }
 
   hydrateFromShow(payload) {
+    const raw = payload.toString();
     let parsed;
     try {
-      parsed = xml.parse(payload.toString());
+      parsed = xml.parse(raw);
     } catch {
       return;
     }
     const show = parsed?.RcvShow;
     if (!show) return;
+
+    // Hold the dump verbatim before parsing anything out of it. The device is the only copy of
+    // a show, and a factory reset or a bad firmware update takes it with no warning — this is
+    // what makes the names, banks and transition set recoverable afterwards.
+    this.lastShowXml = raw;
+    this.lastShowAt = Date.now();
+    this.emit('show', raw);
 
     if (show['@_name'] !== undefined) this.state.showName = show['@_name'];
     if (show['@_switching_mode'] !== undefined) this.state.switchingMode = show['@_switching_mode'];
@@ -247,6 +306,21 @@ export class RcvClient extends EventEmitter {
       const list = Array.isArray(scenes) ? scenes : [scenes];
       this.state.scenes = list.map((s) => String(s?.['@_name'] ?? ''));
     }
+
+    // The other three banks are named in the show dump too, each in its own shape:
+    // <VideoInputs>/<Overlays> are `size="dynamic"` containers of <valueN><name/>, while
+    // <MediaFiles> is a list of <File name="…"/>. An empty name = an unassigned slot.
+    this.state.inputs = dynamicNames(show.VideoInputs);
+    this.state.overlays = dynamicNames(show.Overlays);
+    const files = show.MediaFiles?.File;
+    if (files) {
+      const list = Array.isArray(files) ? files : [files];
+      this.state.media = list.map((f) => String(f?.['@_name'] ?? '').trim());
+    }
+
+    // PgmOverlay is a bitmask of the overlays on program; 0xFFFFFFFF is "unset", not "all on".
+    const mask = Number(show['@_PgmOverlay']);
+    this.state.programOverlays = Number.isInteger(mask) && mask !== 0xFFFFFFFF ? maskToIndices(mask) : [];
 
     this.emit('log', 'show state hydrated');
   }
@@ -305,6 +379,14 @@ export class RcvClient extends EventEmitter {
       limits: this.limits,
       studioMode: this.studioMode,
       state: this.state,
+      // A socket can be up and the device still deaf, so say when it last spoke. `stale` means
+      // two refresh ticks have passed with nothing coming back — the link is nominally connected
+      // but the state below is frozen and should not be trusted.
+      link: {
+        lastRxAt: this.lastRxAt ? new Date(this.lastRxAt).toISOString() : null,
+        lastShowAt: this.lastShowAt ? new Date(this.lastShowAt).toISOString() : null,
+        stale: this.connected && this.lastRxAt != null && Date.now() - this.lastRxAt > this.refreshInterval * 2,
+      },
       lastError: this.lastError,
     };
   }

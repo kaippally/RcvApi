@@ -5,6 +5,7 @@ import swaggerJsdoc from 'swagger-jsdoc';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { RcvClient } from './src/rcv.js';
+import { ShowStore } from './src/showStore.js';
 import { TRANSITIONS, MAX_TRANSITION_MS } from './src/transitions.js';
 
 dotenv.config();
@@ -26,6 +27,12 @@ const rcv = new RcvClient({
 });
 
 rcv.on('log', (msg) => console.log('[RCV] ' + msg));
+
+const shows = new ShowStore(join(dirname(fileURLToPath(import.meta.url)), 'data', 'shows'));
+rcv.on('show', (xmlText) => {
+  const file = shows.archive(xmlText);
+  if (file) console.log('[RCV] show changed — archived ' + file);
+});
 
 const SOURCE_ADDRESSES = { input: '/device/input', scene: '/device/scene', media: '/device/media' };
 const BUTTON_AUTO = 106;
@@ -125,6 +132,52 @@ app.get('/api/health', (_req, res) => {
  */
 app.get('/api/rcv/status', (_req, res) => {
   res.json({ ok: true, ...rcv.status() });
+});
+
+/**
+ * @openapi
+ * /api/rcv/show:
+ *   get:
+ *     summary: The live show dump as the device last sent it (raw XML)
+ *     responses:
+ *       200: { description: OK }
+ *       503: { description: No show dump received yet }
+ */
+app.get('/api/rcv/show', (_req, res) => {
+  if (!rcv.lastShowXml) return fail(res, 503, 'no show dump received yet');
+  res.type('application/xml').send(rcv.lastShowXml);
+});
+
+/**
+ * @openapi
+ * /api/rcv/show/backups:
+ *   get:
+ *     summary: Archived show snapshots, newest first — one per real change
+ *     responses:
+ *       200: { description: OK }
+ */
+app.get('/api/rcv/show/backups', (_req, res) => {
+  res.json({ ok: true, dir: shows.dir, backups: shows.list() });
+});
+
+/**
+ * @openapi
+ * /api/rcv/show/backups/{file}:
+ *   get:
+ *     summary: One archived snapshot, as XML
+ *     parameters:
+ *       - in: path
+ *         name: file
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: OK }
+ *       404: { description: No such snapshot }
+ */
+app.get('/api/rcv/show/backups/:file', (req, res) => {
+  const body = shows.read(req.params.file);
+  if (body == null) return fail(res, 404, 'no such snapshot');
+  res.type('application/xml').send(body);
 });
 
 /**
