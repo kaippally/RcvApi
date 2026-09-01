@@ -136,6 +136,44 @@ app.get('/api/rcv/status', (_req, res) => {
 
 /**
  * @openapi
+ * /api/rcv/probe:
+ *   post:
+ *     summary: Re-arm remote mode and wait for the device to answer — the deaf-link check and its fix
+ *     responses:
+ *       200: { description: Probe ran; `answered` says whether the device replied }
+ *       503: { description: Not connected }
+ */
+// A socket that is open proves nothing about whether the device is still listening: it drops
+// remote-control mode on a show reload or reset without closing the connection, after which the
+// pushed state — and only the pushed state — stops arriving. This asks the question directly.
+// It re-sends /remote (the re-arm, which is the fix for that case), then /show and /device, and
+// waits for anything to come back. `answered:false` means the switcher is genuinely deaf and the
+// socket needs rebuilding; `answered:true` means the link is live as of right now.
+app.post('/api/rcv/probe', async (_req, res) => {
+  if (!requireConnected(res)) return;
+
+  const before = rcv.lastRxAt;
+  rcv.send('/remote');
+  rcv.send('/device/refresh');
+  rcv.send('/device');
+  rcv.send('/show');
+
+  const deadline = Date.now() + 3000;
+  while (rcv.lastRxAt === before && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  const answered = rcv.lastRxAt !== before;
+  res.json({
+    ok: true,
+    answered,
+    waitedMs: answered ? 3000 - (deadline - Date.now()) : 3000,
+    lastRxAt: rcv.lastRxAt ? new Date(rcv.lastRxAt).toISOString() : null,
+    program: rcv.state.program,
+  });
+});
+
+/**
+ * @openapi
  * /api/rcv/show:
  *   get:
  *     summary: The live show dump as the device last sent it (raw XML)

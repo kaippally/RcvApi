@@ -89,6 +89,7 @@ Duration is 0–60000 ms. `mirror` reverses a wipe's direction.
 | POST | `/api/rcv/take` | `auto` (transition) or `cut` |
 | POST | `/api/rcv/transition/run` | One-shot: set + select + take |
 | POST | `/api/rcv/raw` | Send an arbitrary OSC address/args |
+| POST | `/api/rcv/probe` | Re-arm remote mode and wait up to 3s for a reply — the deaf-link check and its fix |
 | GET | `/api/rcv/show` | The live show dump as the device last sent it (raw XML) |
 | GET | `/api/rcv/show/backups` | Archived show snapshots, newest first |
 | GET | `/api/rcv/show/backups/{file}` | One snapshot, raw XML |
@@ -109,6 +110,12 @@ reloaded or RØDE Central takes over, without closing the socket — after which
 `pvwcurrent` never arrive again and PGM/PVW freeze while everything else looks fine. `/remote` is
 therefore re-sent on every 10 s refresh tick (it is idempotent), and `/api/rcv/status` reports
 `link: { lastRxAt, lastShowAt, stale }` so a consumer can tell a live link from a frozen one.
+
+`POST /api/rcv/probe` asks the question directly: it re-sends `/remote`, `/device` and `/show`,
+waits up to 3 s for anything to come back, and answers `{ answered, waitedMs, lastRxAt, program }`.
+A healthy link replies in under 200 ms; `answered: false` on an open socket is the deaf case, and
+the re-arm means running the probe is usually also the repair. If it is not, `POST /api/rcv/connect`
+rebuilds the socket without disturbing what is on air.
 
 ### Switching mode matters
 
