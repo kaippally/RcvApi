@@ -37,6 +37,7 @@ rcv.on('show', (xmlText) => {
 const SOURCE_ADDRESSES = { input: '/device/input', scene: '/device/scene', media: '/device/media' };
 const BUTTON_AUTO = 106;
 const BUTTON_CUT = 105;
+const FTB_BUTTON = 14;
 
 function fail(res, status, message) {
   res.status(status).json({ ok: false, error: message });
@@ -465,6 +466,28 @@ app.post('/api/rcv/source', (req, res) => {
     selected: { type: req.body.type, index: source.index },
     target: rcv.studioMode ? 'preview' : 'program',
   });
+});
+
+/**
+ * @openapi
+ * /api/rcv/ftb:
+ *   post:
+ *     summary: Press the desk's Fade to Black button
+ *     description: >
+ *       Blanks the programme output and fades the audio with it — the same press as the
+ *       button on the front panel, and a toggle in the same way: pressing again brings the
+ *       picture back. Sent as the button-14 pair (0 then 1) that RØDE's own control app
+ *       sends; the lamp comes back on `/device/buttons/14/colour` and is reported as
+ *       `state.ftb`.
+ *     responses:
+ *       200: { description: Pressed }
+ */
+app.post('/api/rcv/ftb', (req, res) => {
+  if (!requireConnected(res)) return;
+  // Down then up: FTB is the one button the desk wants as a pair rather than a single 1.
+  rcv.send('/device/button', FTB_BUTTON, 0);
+  rcv.send('/device/button', FTB_BUTTON, 1);
+  res.json({ ok: true, pressed: 'ftb' });
 });
 
 /**

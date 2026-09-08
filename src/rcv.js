@@ -9,19 +9,24 @@ const DISCOVERY_PORT = 9999;
 const DISCOVERY_PAYLOAD = 'RodeBroadcast';
 const DISCOVERY_TIMEOUT = 2000;
 const CONNECT_TIMEOUT = 12000;
+// The FTB button and the lamp code that means it is blanking the programme.
+const FTB_BUTTON = 14;
+const FTB_ON = 4;
 
 const xml = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', parseAttributeValue: true });
 
 // `<Thing size="dynamic"><value0><name>…</name></value0>…` — JUCE's array serialisation, used by
 // <VideoInputs> and <Overlays>. Ordered by the numeric suffix, because object key order is not a
 // contract; a slot with no name is an empty bank and stays an empty string.
-function dynamicNames(node) {
+function dynamicField(node, field) {
   if (!node || typeof node !== 'object') return [];
   return Object.keys(node)
     .filter((k) => /^value\d+$/.test(k))
     .sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)))
-    .map((k) => String(node[k]?.name ?? '').trim());
+    .map((k) => String(node[k]?.[field] ?? '').trim());
 }
+
+const dynamicNames = (node) => dynamicField(node, 'name');
 
 /** Bit 0 = index 1. */
 function maskToIndices(mask) {
@@ -74,10 +79,33 @@ export class RcvClient extends EventEmitter {
       // Bank names as the operator set them on the device. Only <Scenes> rides the push
       // channel; these three come from the show dump, which is why it is re-requested.
       inputs: [],
+      /**
+       * What is physically behind each input, from the show dump's `<VideoInputs><type>`:
+       * 'hdmi 1'..'hdmi 3' for a wired socket, 'none' for a bank the operator named but never
+       * gave a source.
+       *
+       * An input with 'none' CANNOT be put on programme. The desk accepts `/device/input N`
+       * and then does nothing at all — pgmcurrent never moves, so nothing downstream can tell
+       * the press apart from one that never happened. Reported here because it is the only
+       * warning any consumer can get before wiring a button that will never fire.
+       */
+      inputSources: [],
       media: [],
       overlays: [],
       /** 1-based indices of the overlays currently on program (from the PgmOverlay bitmask). */
       programOverlays: [],
+      /**
+       * Fade to black — the desk's own blank button, lit or not.
+       *
+       * It is invisible everywhere else: blanking does not move `pgmcurrent`, does not touch a
+       * show attribute and writes nothing to the show dump, so the ONLY report of it is the
+       * button's own lamp: `/device/buttons/14/colour 4` when the programme goes black, `3`
+       * when it comes back, with nothing else on the wire (measured on an RCV S, firmware
+       * 1.3.05). The lamp LATCHES — 4 stands for as long as the desk is blanking, it is not a
+       * press/release pulse — so a poller sampling this a few times a second cannot miss it.
+       * Button 14 is FTB on every model — the same index RØDE's own Companion module drives.
+       */
+      ftb: false,
     };
   }
 
@@ -235,9 +263,18 @@ export class RcvClient extends EventEmitter {
         this.state.transitionCategory = String(first);
         if (String(first) === 'fade') this.state.transition = 'fade';
         break;
-      case '/show/transition_data':
-        this.state.transition = String(first);
+      case '/show/transition_data': {
+        // A FADE HAS NO VARIANT, and the device says so by pushing `none` here. Taking that
+        // literally overwrote the id we had just derived from the category, so a desk sitting on
+        // Fade reported `transition: "none"` for ever — while `transitionCategory` still read
+        // `fade`, one field disagreeing with the other. It reads as "this desk has no transition
+        // set", which is a lie that sends whoever believes it looking for the wrong fault
+        // entirely. The XML hydration path below already guards this; the live handler did not.
+        const data = String(first);
+        if (data && data !== 'none') this.state.transition = data;
+        else if (this.state.transitionCategory) this.state.transition = this.state.transitionCategory;
         break;
+      }
       case '/show/transition_time':
         this.state.transitionTimeMs = Number(first);
         break;
@@ -261,6 +298,11 @@ export class RcvClient extends EventEmitter {
         break;
       case '/show/pvwcurrent':
         this.state.preview = { type: String(first), index: Number(args[1]) };
+        break;
+      // 4 = blanking, 3 = not. Every other code is a bank state that cannot apply to a button
+      // with nothing behind it.
+      case `/device/buttons/${FTB_BUTTON}/colour`:
+        this.state.ftb = Number(first) === FTB_ON;
         break;
     }
 
@@ -296,8 +338,10 @@ export class RcvClient extends EventEmitter {
     if (category !== undefined) this.state.transitionCategory = category;
 
     // Fade carries no variant, so its category IS the transition; every other
-    // transition reports its variant in transition_data.
-    if (data !== undefined && data !== null && data !== '') this.state.transition = data;
+    // transition reports its variant in transition_data. The device spells "no variant" as the
+    // STRING `none`, which this guard let through — so a desk sitting on Fade hydrated as
+    // `transition: "none"` and read as a desk with no transition at all.
+    if (data !== undefined && data !== null && data !== '' && data !== 'none') this.state.transition = data;
     else if (category !== undefined) this.state.transition = category;
 
     // A single <Scene/> parses to an object rather than an array.
@@ -311,6 +355,7 @@ export class RcvClient extends EventEmitter {
     // <VideoInputs>/<Overlays> are `size="dynamic"` containers of <valueN><name/>, while
     // <MediaFiles> is a list of <File name="…"/>. An empty name = an unassigned slot.
     this.state.inputs = dynamicNames(show.VideoInputs);
+    this.state.inputSources = dynamicField(show.VideoInputs, 'type');
     this.state.overlays = dynamicNames(show.Overlays);
     const files = show.MediaFiles?.File;
     if (files) {
