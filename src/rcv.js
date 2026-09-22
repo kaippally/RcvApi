@@ -28,11 +28,13 @@ function dynamicField(node, field) {
 
 const dynamicNames = (node) => dynamicField(node, 'name');
 
-/** Bit 0 = index 1. */
-function maskToIndices(mask) {
-  const out = [];
-  for (let bit = 0; bit < 32; bit++) if (mask & (1 << bit)) out.push(bit + 1);
-  return out;
+// An overlay's <source> is `videoInput|3`; it is keyed the way the program source is, so an
+// input spells `input:3` on both sides. An empty slot (`|`) is null.
+function overlaySourceKey(raw) {
+  const [kind, n] = String(raw).split('|');
+  const index = Number(n);
+  if (!kind || !Number.isInteger(index) || index < 1) return null;
+  return `${kind === 'videoInput' ? 'input' : kind}:${index}`;
 }
 
 export class RcvClient extends EventEmitter {
@@ -92,7 +94,9 @@ export class RcvClient extends EventEmitter {
       inputSources: [],
       media: [],
       overlays: [],
-      /** 1-based indices of the overlays currently on program (from the PgmOverlay bitmask). */
+      /** Per overlay bank, the source it keys — `input:3` — or null for an empty bank. */
+      overlaySources: [],
+      /** The overlay on program, 1-based, as a list of at most one — the desk keys one at a time. */
       programOverlays: [],
       /**
        * Fade to black — the desk's own blank button, lit or not.
@@ -208,6 +212,17 @@ export class RcvClient extends EventEmitter {
       this.reconnectTimer = null;
       this.connect();
     }, this.reconnectInterval);
+  }
+
+  // PgmOverlay rides only the show dump, so anything deciding on it asks for a fresh one first.
+  refreshShow(timeoutMs = 2000) {
+    return new Promise((resolve) => {
+      const done = (ok) => { clearTimeout(timer); this.off('show', onShow); resolve(ok); };
+      const onShow = () => done(true);
+      const timer = setTimeout(() => done(false), timeoutMs);
+      this.on('show', onShow);
+      this.send('/show');
+    });
   }
 
   send(address, ...args) {
@@ -357,15 +372,17 @@ export class RcvClient extends EventEmitter {
     this.state.inputs = dynamicNames(show.VideoInputs);
     this.state.inputSources = dynamicField(show.VideoInputs, 'type');
     this.state.overlays = dynamicNames(show.Overlays);
+    this.state.overlaySources = dynamicField(show.Overlays, 'source').map(overlaySourceKey);
     const files = show.MediaFiles?.File;
     if (files) {
       const list = Array.isArray(files) ? files : [files];
       this.state.media = list.map((f) => String(f?.['@_name'] ?? '').trim());
     }
 
-    // PgmOverlay is a bitmask of the overlays on program; 0xFFFFFFFF is "unset", not "all on".
-    const mask = Number(show['@_PgmOverlay']);
-    this.state.programOverlays = Number.isInteger(mask) && mask !== 0xFFFFFFFF ? maskToIndices(mask) : [];
+    // PgmOverlay is the 0-based index of the ONE overlay on program, not a bitmask: D on reads 3,
+    // B reads 1, none reads 0xFFFFFFFF. Read as a mask, 3 became A+B and a clear toggled both.
+    const on = Number(show['@_PgmOverlay']);
+    this.state.programOverlays = Number.isInteger(on) && on >= 0 && on < this.limits.overlays ? [on + 1] : [];
 
     this.emit('log', 'show state hydrated');
   }

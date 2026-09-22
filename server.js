@@ -520,6 +520,40 @@ app.post('/api/rcv/overlay', (req, res) => {
 
 /**
  * @openapi
+ * /api/rcv/overlay/clear-source:
+ *   post:
+ *     summary: Take off air every overlay that keys the given source
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [source]
+ *             properties:
+ *               source: { type: string, example: 'input:3' }
+ *     responses:
+ *       200: { description: "`hidden` lists the overlays taken down" }
+ */
+// The desk only toggles, so an overlay is sent the toggle only when a show dump fetched just now
+// says it is on — a stale PgmOverlay would turn a hidden one back ON.
+app.post('/api/rcv/overlay/clear-source', async (req, res) => {
+  const source = String(req.body?.source ?? '');
+  if (!/^[a-z]+:\d+$/i.test(source)) return fail(res, 400, 'source must look like input:3');
+  if (!requireConnected(res)) return;
+
+  if (!(await rcv.refreshShow())) return fail(res, 504, 'the switcher did not return its show');
+  const { overlaySources, programOverlays, overlays } = rcv.state;
+  const hidden = programOverlays
+    .filter((i) => overlaySources[i - 1] === source)
+    .map((i) => ({ index: i, name: overlays[i - 1] || `Overlay ${i}` }));
+  for (const o of hidden) rcv.send('/device/toggleOverlay', o.index);
+  if (hidden.length) void rcv.refreshShow();
+  res.json({ ok: true, source, hidden });
+});
+
+/**
+ * @openapi
  * /api/rcv/take:
  *   post:
  *     summary: Perform the transition (AUTO) or a hard cut (CUT)
