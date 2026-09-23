@@ -271,6 +271,35 @@ app.get('/api/rcv/transitions', (_req, res) => {
 
 /**
  * @openapi
+ * /api/rcv/audio:
+ *   get:
+ *     summary: The audio mixer as the last show dump described it
+ *     description: >
+ *       Strips, per-mix faders and mutes, input gain, and which processing blocks each strip
+ *       carries. Read-only. `staleMs` is how long ago the dump it came from arrived — nothing
+ *       pushes an audio change, so this is only as fresh as the 30s show re-poll, and `mute` is
+ *       NOT known to be the live mute (the dump reads every strip muted on a desk that is on air).
+ *     responses:
+ *       200: { description: OK }
+ */
+app.get('/api/rcv/audio', (_req, res) => {
+  res.json({
+    ok: true,
+    connected: rcv.connected,
+    audio: rcv.state.audio,
+    lastShowAt: rcv.lastShowAt ? new Date(rcv.lastShowAt).toISOString() : null,
+    staleMs: rcv.lastShowAt ? Date.now() - rcv.lastShowAt : null,
+    // Said in the payload, not only in the docs: a consumer that never reads the Swagger page
+    // must still be told that the mute field has not been proven against the device.
+    caveats: {
+      muteUnverified: 'The show dump reported every strip muted while the desk was on air. Treat mute as unconfirmed until a live /audioSource/{ch}/scene_mute read settles it.',
+      levelIsPerMix: 'A strip has one fader per mix (14 on the RCV S). `gainDb` is input gain, not the fader.',
+    },
+  });
+});
+
+/**
+ * @openapi
  * /api/rcv/scenes:
  *   get:
  *     summary: Scene bank names with their on-air state
@@ -516,6 +545,32 @@ app.post('/api/rcv/overlay', (req, res) => {
 
   rcv.send('/device/toggleOverlay', index);
   res.json({ ok: true, overlay: index });
+});
+
+/**
+ * @openapi
+ * /api/rcv/overlay/state:
+ *   get:
+ *     summary: Which overlay is keyed over program, live
+ *     description: >
+ *       Live: the desk pushes `/show/PgmOverlay` the instant an overlay is keyed or cleared, so
+ *       this is the state as of the last press, not as of the 30 s show re-poll. `keyed` is the
+ *       1-based overlay index or null, and
+ *       `source` is the program key that overlay duplicates (`input:3`), which is what makes
+ *       an overlay keying the live source recognisable as the combination that cannot exist.
+ *     responses:
+ *       200: { description: "`keyed`, its `name` and its `source`" }
+ */
+app.get('/api/rcv/overlay/state', (_req, res) => {
+  if (!requireConnected(res)) return;
+  const { overlaySources, programOverlays, overlays } = rcv.state;
+  const keyed = programOverlays[0] ?? null;
+  res.json({
+    ok: true,
+    keyed,
+    name: keyed ? overlays[keyed - 1] || `Overlay ${keyed}` : null,
+    source: keyed ? overlaySources[keyed - 1] ?? null : null,
+  });
 });
 
 /**

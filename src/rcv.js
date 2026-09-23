@@ -37,6 +37,71 @@ function overlaySourceKey(raw) {
   return `${kind === 'videoInput' ? 'input' : kind}:${index}`;
 }
 
+/**
+ * The `<AudioMixer>` tree, as much of it as can be read.
+ *
+ * Derived empirically from an RCV **S** on firmware 1.3.05.1408, because the protocol notes in
+ * circulation describe the RCV, not the S, and the two do not share an input count. Do not
+ * hardcode a channel range against this — enumerate what the dump actually holds.
+ *
+ * Three findings the shape depends on:
+ *
+ * - **48 source slots, sparse and 0-based.** Seven are populated on this desk (0, 1, 5, 6, 20,
+ *   21, 23). They are not a 1..N run and nothing may iterate them as one.
+ * - **`<level>` on a source is INPUT GAIN in dB, not the fader** — it reads 50 on the mic
+ *   preamps, −12 on the line inputs, 0 on the USB strips. The fader is the per-mix `level`,
+ *   a float 0..1.
+ * - **14 mixes per source**, each with its own level, mute, disabled and link. Not the two
+ *   submixes the documentation describes.
+ *
+ * `mute` is reported verbatim and is NOT known to be the live mute — the dump read every strip
+ * muted while the desk was on air. Callers are told so rather than being handed a guess.
+ */
+function parseAudioMixer(node) {
+  if (!node || typeof node !== 'object') return null;
+  const sources = [];
+  for (const { idx, value } of dynamicEntries(node.audiosources)) {
+    const name = String(value?.name ?? '').trim();
+    if (!name) continue;                       // an unnamed slot is an empty strip
+    const mixes = dynamicEntries(value.mixes).map(({ idx: m, value: v }) => ({
+      index: m,
+      level: Number(v?.level ?? 0),
+      mute: Boolean(v?.mute),
+      disabled: Boolean(v?.disabled),
+      link: Boolean(v?.link),
+    }));
+    sources.push({
+      index: idx,
+      name,
+      enabled: value?.enabled !== false,
+      type: Number(value?.type ?? -1),
+      gainDb: Number(value?.level ?? 0),
+      listen: Boolean(value?.listen),
+      p48: Boolean(value?.p48),
+      mixes,
+      // Present and readable on every strip. Whether OSC will WRITE any of it is untested.
+      processing: value?.channelprocessing ? Object.keys(value.channelprocessing) : [],
+    });
+  }
+  const delay = node.masteraudiodelay;
+  return {
+    version: Number(node.version ?? 0),
+    sources,
+    mixCount: sources[0]?.mixes.length ?? 0,
+    masterDelay: delay ? { on: Boolean(delay.on), valueMs: Number(delay.valueMs ?? 0) } : null,
+    masterCompellor: node.mastercompellor ?? null,
+  };
+}
+
+/** `<Thing size="dynamic"><valueN>…` with the index kept — the slot number IS the channel id. */
+function dynamicEntries(node) {
+  if (!node || typeof node !== 'object') return [];
+  return Object.keys(node)
+    .filter((k) => /^value\d+$/.test(k))
+    .sort((a, b) => Number(a.slice(5)) - Number(b.slice(5)))
+    .map((k) => ({ idx: Number(k.slice(5)), value: node[k] }));
+}
+
 export class RcvClient extends EventEmitter {
   constructor({ ip, port = 10024, reconnectInterval = 10000, refreshInterval = 10000, showInterval = 30000 }) {
     super();
@@ -98,6 +163,15 @@ export class RcvClient extends EventEmitter {
       overlaySources: [],
       /** The overlay on program, 1-based, as a list of at most one — the desk keys one at a time. */
       programOverlays: [],
+      /**
+       * The audio mixer, parsed out of the show dump — strips, faders, mutes, input gain and
+       * which processing blocks each strip carries. Null until the first `/show` lands.
+       *
+       * **It is only as fresh as the 30 s show re-poll**, and nothing pushes an audio change, so
+       * a fader moved on the desk reads stale here for up to that long. Anything consuming it
+       * must say so rather than drawing it as live.
+       */
+      audio: null,
       /**
        * Fade to black — the desk's own blank button, lit or not.
        *
@@ -256,9 +330,23 @@ export class RcvClient extends EventEmitter {
     }
   }
 
+  // PgmOverlay is the 0-based index of the ONE overlay on program, not a bitmask: D on reads 3,
+  // B reads 1, none reads 0xFFFFFFFF. Read as a mask, 3 became A+B and a clear toggled both
+  // (BUG-1828). It arrives two ways — as an attribute on the show dump and as a pushed
+  // /show/PgmOverlay, a string in both — so the decode lives here and neither path owns it.
+  setPgmOverlay(raw) {
+    const on = Number(raw);
+    this.state.programOverlays = Number.isInteger(on) && on >= 0 && on < this.limits.overlays ? [on + 1] : [];
+  }
+
   handle(address, args) {
     if (address === '/show') return this.hydrateFromShow(args[0]);
     if (address === '/meters/values') return;
+
+    // RCV_LOG_RX=1 logs everything the desk pushes except the meters. Off by default because the
+    // push channel is busy; on when something has to be traced back to a physical press — which
+    // is the only way to find out which addresses a button actually sends.
+    if (process.env.RCV_LOG_RX === '1') this.emit('log', '<- ' + address + ' ' + JSON.stringify(args));
 
     const first = args[0];
 
@@ -307,6 +395,14 @@ export class RcvClient extends EventEmitter {
         break;
       case '/show/recordEnabled':
         this.state.recording = Boolean(Number(first));
+        break;
+      // THE DESK PUSHES THIS THE INSTANT AN OVERLAY IS KEYED OR CLEARED — measured on the
+      // hardware, same 0-based index and the same 0xFFFFFFFF for none as the dump's attribute.
+      // Without this case the only copy of the overlay state was the 30 s show re-poll, so a
+      // press was seen up to half a minute late and a toggle read as a slow square wave
+      // (BUG-1835). The re-poll still corrects the state if a push is ever missed.
+      case '/show/PgmOverlay':
+        this.setPgmOverlay(first);
         break;
       case '/show/pgmcurrent':
         this.state.program = { type: String(first), index: Number(args[1]) };
@@ -379,10 +475,9 @@ export class RcvClient extends EventEmitter {
       this.state.media = list.map((f) => String(f?.['@_name'] ?? '').trim());
     }
 
-    // PgmOverlay is the 0-based index of the ONE overlay on program, not a bitmask: D on reads 3,
-    // B reads 1, none reads 0xFFFFFFFF. Read as a mask, 3 became A+B and a clear toggled both.
-    const on = Number(show['@_PgmOverlay']);
-    this.state.programOverlays = Number.isInteger(on) && on >= 0 && on < this.limits.overlays ? [on + 1] : [];
+    this.setPgmOverlay(show['@_PgmOverlay']);
+
+    this.state.audio = parseAudioMixer(show.AudioMixer);
 
     this.emit('log', 'show state hydrated');
   }
